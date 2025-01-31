@@ -736,16 +736,25 @@ app.get('/api/users/:userId', authenticateToken, async (req, res) => {
                     });
                 }
 
-                // Fetch activity hours for each activity
-                const activitiesWithHours = await Promise.all(activitiesResults.map(async (activity) => {
+                // Fetch activity hours and images for each activity
+                const activitiesWithDetails = await Promise.all(activitiesResults.map(async (activity) => {
                     return new Promise((resolve, reject) => {
                         const hoursQuery = 'SELECT * FROM activity_hours WHERE activity_id = ?';
+                        const imagesQuery = 'SELECT * FROM activity_images WHERE activity_id = ?';
+
                         connection.query(hoursQuery, [activity.activity_id], (err, hoursResults) => {
                             if (err) {
                                 return reject(err);
                             }
                             activity.hours = hoursResults;
-                            resolve(activity);
+
+                            connection.query(imagesQuery, [activity.activity_id], (err, imagesResults) => {
+                                if (err) {
+                                    return reject(err);
+                                }
+                                activity.images = imagesResults;
+                                resolve(activity);
+                            });
                         });
                     });
                 }));
@@ -755,7 +764,7 @@ app.get('/api/users/:userId', authenticateToken, async (req, res) => {
                     message: 'User details retrieved successfully',
                     data: {
                         user,
-                        activities: activitiesWithHours
+                        activities: activitiesWithDetails
                     }
                 });
             });
@@ -1062,11 +1071,167 @@ app.post('/api/activities', authenticateToken, upload.single('logo'), async (req
     }
 });
 
-// API to create activity hours
-app.post('/api/activity_hours', authenticateToken, async (req, res) => {
-    const { activity_id, day_of_week, opening_time, closing_time } = req.body;
+// API to update an activity
+app.put('/api/activities/:activity_id', authenticateToken, upload.single('logo'), async (req, res) => {
+    const { activity_id } = req.params;
+    const { name, description, city_id, category_id, address, capacity } = req.body;
+    const user_id = req.user.userId;
 
-    if (!activity_id || !day_of_week || !opening_time || !closing_time) {
+    console.log("req.user:", req.user.role_id == 4); // Log the entire req.user object
+
+    if (!req.user || req.user.role_id != 4) {
+        return res.status(403).send({
+            status: 'error',
+            message: 'Only users with role_id 4 can update activities',
+            data: null
+        });
+    }
+
+    if (!name || !description || !city_id || !category_id || !address || !capacity) {
+        return res.status(400).send({
+            status: 'error',
+            message: 'All fields are required',
+            data: null
+        });
+    }
+
+    const logoUrl = req.file ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}` : null;
+
+    try {
+        const query = `
+            UPDATE activities 
+            SET name = ?, description = ?, city_id = ?, category_id = ?, address = ?, capacity = ?, logo = ?
+            WHERE activity_id = ? AND owner_id = ?
+        `;
+        const values = [name, description, city_id, category_id, address, capacity, logoUrl, activity_id, user_id];
+
+        connection.query(query, values, (err, result) => {
+            if (err) {
+                console.error(err);
+                return res.status(500).send({
+                    status: 'error',
+                    message: 'Error updating activity',
+                    data: null
+                });
+            }
+
+            if (result.affectedRows === 0) {
+                return res.status(404).send({
+                    status: 'error',
+                    message: 'Activity not found or you do not have permission to update it',
+                    data: null
+                });
+            }
+
+            res.status(200).send({
+                status: 'success',
+                message: 'Activity updated successfully',
+                data: { activityId: activity_id }
+            });
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send({
+            status: 'error',
+            message: 'Server error',
+            data: null
+        });
+    }
+});
+
+// API to create or update activity hours
+app.post('/api/activity_hours', authenticateToken, async (req, res) => {
+    const { activity_id, day_of_week, opening_time, closing_time, is_closed } = req.body;
+
+    if (!activity_id || !day_of_week || !opening_time || !closing_time || is_closed === undefined) {
+        return res.status(400).send({
+            status: 'error',
+            message: 'All fields are required',
+            data: null
+        });
+    }
+
+    try {
+        const selectQuery = `
+            SELECT id FROM activity_hours WHERE activity_id = ? AND day_of_week = ?
+        `;
+        const selectValues = [activity_id, day_of_week];
+
+        connection.query(selectQuery, selectValues, (err, results) => {
+            if (err) {
+                console.error(err);
+                return res.status(500).send({
+                    status: 'error',
+                    message: 'Error checking existing activity hours',
+                    data: null
+                });
+            }
+
+            if (results.length > 0) {
+                // Update existing activity hours
+                const updateQuery = `
+                    UPDATE activity_hours 
+                    SET opening_time = ?, closing_time = ?, is_closed = ?
+                    WHERE id = ?
+                `;
+                const updateValues = [opening_time, closing_time, is_closed, results[0].id];
+
+                connection.query(updateQuery, updateValues, (err) => {
+                    if (err) {
+                        console.error(err);
+                        return res.status(500).send({
+                            status: 'error',
+                            message: 'Error updating activity hours',
+                            data: null
+                        });
+                    }
+                    res.status(200).send({
+                        status: 'success',
+                        message: 'Activity hours updated successfully',
+                        data: { id: results[0].id }
+                    });
+                });
+            } else {
+                // Insert new activity hours
+                const insertQuery = `
+                    INSERT INTO activity_hours (activity_id, day_of_week, opening_time, closing_time, is_closed)
+                    VALUES (?, ?, ?, ?, ?)
+                `;
+                const insertValues = [activity_id, day_of_week, opening_time, closing_time, is_closed];
+
+                connection.query(insertQuery, insertValues, (err, result) => {
+                    if (err) {
+                        console.error(err);
+                        return res.status(500).send({
+                            status: 'error',
+                            message: 'Error creating activity hours',
+                            data: null
+                        });
+                    }
+                    res.status(201).send({
+                        status: 'success',
+                        message: 'Activity hours created successfully',
+                        data: { id: result.insertId }
+                    });
+                });
+            }
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send({
+            status: 'error',
+            message: 'Server error',
+            data: null
+        });
+    }
+});
+
+// API to update activity hours
+app.put('/api/activity_hours/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { opening_time, closing_time, is_closed } = req.body;
+
+    if (!opening_time || !closing_time || is_closed === undefined) {
         return res.status(400).send({
             status: 'error',
             message: 'All fields are required',
@@ -1076,24 +1241,163 @@ app.post('/api/activity_hours', authenticateToken, async (req, res) => {
 
     try {
         const query = `
-            INSERT INTO activity_hours (activity_id, day_of_week, opening_time, closing_time)
-            VALUES (?, ?, ?, ?)
+            UPDATE activity_hours 
+            SET opening_time = ?, closing_time = ?, is_closed = ?
+            WHERE id = ?
         `;
-        const values = [activity_id, day_of_week, opening_time, closing_time];
+        const values = [opening_time, closing_time, is_closed, id];
 
         connection.query(query, values, (err, result) => {
             if (err) {
                 console.error(err);
                 return res.status(500).send({
                     status: 'error',
-                    message: 'Error creating activity hours',
+                    message: 'Error updating activity hours',
                     data: null
                 });
             }
-            res.status(201).send({
+
+            if (result.affectedRows === 0) {
+                return res.status(404).send({
+                    status: 'error',
+                    message: 'Activity hours not found',
+                    data: null
+                });
+            }
+
+            res.status(200).send({
                 status: 'success',
-                message: 'Activity hours created successfully',
-                data: { id: result.insertId }
+                message: 'Activity hours updated successfully',
+                data: { id }
+            });
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send({
+            status: 'error',
+            message: 'Server error',
+            data: null
+        });
+    }
+});
+
+// API to upload activity images
+app.post('/api/activity_images', authenticateToken, upload.array('images', 10), async (req, res) => {
+    const { activity_id } = req.body;
+
+    if (!activity_id || !req.files || req.files.length === 0) {
+        return res.status(400).send({
+            status: 'error',
+            message: 'Activity ID and images are required',
+            data: null
+        });
+    }
+
+    try {
+        const imageUrls = req.files.map(file => `${req.protocol}://${req.get('host')}/uploads/${file.filename}`);
+        const values = imageUrls.map(url => [activity_id, url]);
+
+        const query = `
+            INSERT INTO activity_images (activity_id, image_url)
+            VALUES ?
+        `;
+
+        connection.query(query, [values], (err, result) => {
+            if (err) {
+                console.error(err);
+                return res.status(500).send({
+                    status: 'error',
+                    message: 'Error uploading activity images',
+                    data: null
+                });
+            }
+
+            // Get the inserted image IDs
+            const imageIdsQuery = 'SELECT image_id FROM activity_images WHERE activity_id = ? AND image_url IN (?)';
+            connection.query(imageIdsQuery, [activity_id, imageUrls], (err, imageIdsResult) => {
+                if (err) {
+                    console.error(err);
+                    return res.status(500).send({
+                        status: 'error',
+                        message: 'Error retrieving image IDs',
+                        data: null
+                    });
+                }
+
+                const imageIds = imageIdsResult.map(row => row.image_id);
+                res.status(201).send({
+                    status: 'success',
+                    message: 'Activity images uploaded successfully',
+                    data: { imageUrls, imageIds }
+                });
+            });
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send({
+            status: 'error',
+            message: 'Server error',
+            data: null
+        });
+    }
+});
+
+// API to delete an activity image
+app.delete('/api/activity_images/:image_id', authenticateToken, async (req, res) => {
+    const { image_id } = req.params;
+
+    try {
+        const query = 'SELECT image_url FROM activity_images WHERE image_id = ?'; // Correct column name
+        connection.query(query, [image_id], (err, results) => {
+            if (err) {
+                console.error(err);
+                return res.status(500).send({
+                    status: 'error',
+                    message: 'Error retrieving image',
+                    data: null
+                });
+            }
+
+            if (results.length === 0) {
+                return res.status(404).send({
+                    status: 'error',
+                    message: 'Image not found',
+                    data: null
+                });
+            }
+
+            const imageUrl = results[0].image_url;
+            const filePath = path.join(__dirname, 'uploads', path.basename(imageUrl));
+
+            // Delete the image file from the server
+            fs.unlink(filePath, (err) => {
+                if (err) {
+                    console.error(err);
+                    return res.status(500).send({
+                        status: 'error',
+                        message: 'Error deleting image file',
+                        data: null
+                    });
+                }
+
+                // Delete the image record from the database
+                const deleteQuery = 'DELETE FROM activity_images WHERE image_id = ?'; // Correct column name
+                connection.query(deleteQuery, [image_id], (err) => {
+                    if (err) {
+                        console.error(err);
+                        return res.status(500).send({
+                            status: 'error',
+                            message: 'Error deleting image record',
+                            data: null
+                        });
+                    }
+
+                    res.status(200).send({
+                        status: 'success',
+                        message: 'Image deleted successfully',
+                        data: null
+                    });
+                });
             });
         });
     } catch (err) {
