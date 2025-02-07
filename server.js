@@ -736,25 +736,75 @@ app.get('/api/users/:userId', authenticateToken, async (req, res) => {
                     });
                 }
 
-                // Fetch activity hours and images for each activity
+                // Fetch activity hours, images, and related tables for each activity
                 const activitiesWithDetails = await Promise.all(activitiesResults.map(async (activity) => {
+                    let relatedQuery;
+                    switch (activity.category_id) {
+    
+                            case 3: // Salons de beauté
+                            relatedQuery = `
+                                SELECT restaurants.*, menus.*, type_menu.nom AS type_menu_nom 
+                                FROM restaurants 
+                                LEFT JOIN menus ON restaurants.id = menus.restaurant_id 
+                                LEFT JOIN type_menu ON menus.type_menu_id = type_menu.id
+                                WHERE restaurants.activity_id = ?;
+                            `;
+                            break;
+                            case 4: // Salons de beauté
+                            relatedQuery = `
+                                SELECT spas.*, spas_soins.*, types_soins.* 
+                                FROM spas 
+                                LEFT JOIN spas_soins ON spas.id = spas_soins.spa_id 
+                                LEFT JOIN types_soins ON spas_soins.type_soin_id = types_soins.id
+                                WHERE spas.activity_id = ?;
+                            `;
+                            break;
+    
+                            case 5: // Salons de beauté
+                            relatedQuery = `
+                                SELECT sb.*, ss.*, sb.id AS salon_id, sb.activity_id AS activity_id, ss.id AS service_id, ss.nom AS service_nom, ss.prix AS service_prix
+                                FROM salons_beaute sb
+                                LEFT JOIN salons_services ss ON sb.id = ss.salon_id
+                                LEFT JOIN services_beaute s ON ss.service_id = s.id
+                                WHERE sb.activity_id = ?;
+                            `;
+                            break;
+                        case 6: // Piscines
+                            relatedQuery = `
+                                SELECT piscines.*, piscines_services.*, services_piscine.nom AS service_nom
+                                FROM piscines
+                                LEFT JOIN piscines_services ON piscines.id = piscines_services.piscine_id
+                                LEFT JOIN services_piscine ON piscines_services.service_id = services_piscine.id
+                                WHERE piscines.activity_id = ?;
+                            `;
+                            break;
+                        case 7: // Villas
+                            relatedQuery = `
+                                SELECT villas.*, villas_services.*, services_villa.nom AS service_nom
+                                FROM villas
+                                LEFT JOIN villas_services ON villas.id = villas_services.villa_id
+                                LEFT JOIN services_villa ON villas_services.service_id = services_villa.id
+                                WHERE villas.activity_id = ?;
+                            `;
+                            break;
+                        case 8: // Excursions
+                            relatedQuery = `
+                                SELECT * FROM excursions WHERE activity_id = ?;
+                            `;
+                            break;
+                        default:
+                            return activity;
+                    }
+    
                     return new Promise((resolve, reject) => {
-                        const hoursQuery = 'SELECT * FROM activity_hours WHERE activity_id = ?';
-                        const imagesQuery = 'SELECT * FROM activity_images WHERE activity_id = ?';
-
-                        connection.query(hoursQuery, [activity.activity_id], (err, hoursResults) => {
+                        connection.query(relatedQuery, [activity.activity_id, activity.activity_id], (err, results) => {
                             if (err) {
                                 return reject(err);
                             }
-                            activity.hours = hoursResults;
-
-                            connection.query(imagesQuery, [activity.activity_id], (err, imagesResults) => {
-                                if (err) {
-                                    return reject(err);
-                                }
-                                activity.images = imagesResults;
-                                resolve(activity);
-                            });
+                            //afficier in cosole the results
+                            console.log("resultsresults",results);
+                            activity.related = results;
+                            resolve(activity);
                         });
                     });
                 }));
@@ -1016,12 +1066,12 @@ app.get('/api/cities', async (req, res) => {
 
 // API to create an activity
 app.post('/api/activities', authenticateToken, upload.single('logo'), async (req, res) => {
-    const { name, description, city_id, category_id, address, capacity } = req.body;
+    const { name, description, city_id, category_id, address, capacity, active, reservations_allowed } = req.body;
     const user_id = req.user.userId;
 
     console.log("req.user:", req.user.role_id == 4); // Log the entire req.user object
 
-    if (!req.user  || req.user.role_id != 4) {
+    if (!req.user || req.user.role_id != 4) {
         return res.status(403).send({
             status: 'error',
             message: 'Only users with role_id 4 can create activities',
@@ -1029,7 +1079,7 @@ app.post('/api/activities', authenticateToken, upload.single('logo'), async (req
         });
     }
 
-    if (!name || !description || !city_id || !category_id || !address || !capacity || !req.file) {
+    if (!name || !description || !city_id || !category_id || !address || !capacity || !req.file || active === undefined || reservations_allowed === undefined) {
         return res.status(400).send({
             status: 'error',
             message: 'All fields are required',
@@ -1041,10 +1091,10 @@ app.post('/api/activities', authenticateToken, upload.single('logo'), async (req
 
     try {
         const query = `
-            INSERT INTO activities (name, description, city_id, category_id, address, capacity, logo, owner_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO activities (name, description, city_id, category_id, address, capacity, logo, owner_id, active, reservations_allowed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
-        const values = [name, description, city_id, category_id, address, capacity, logoUrl, user_id];
+        const values = [name, description, city_id, category_id, address, capacity, logoUrl, user_id, active, reservations_allowed];
 
         connection.query(query, values, (err, result) => {
             if (err) {
@@ -1055,10 +1105,49 @@ app.post('/api/activities', authenticateToken, upload.single('logo'), async (req
                     data: null
                 });
             }
-            res.status(201).send({
-                status: 'success',
-                message: 'Activity created successfully',
-                data: { activityId: result.insertId }
+
+            const activityId = result.insertId;
+
+            // Insert into respective tables based on category
+            let categoryQuery;
+            switch (category_id) {
+                case 4: // Spas
+                    categoryQuery = 'INSERT INTO spas (activity_id) VALUES (?)';
+                    break;
+                case 5: // Salons de beauté
+                    categoryQuery = 'INSERT INTO salons_beaute (activity_id) VALUES (?)';
+                    break;
+                case 6: // Piscines
+                    categoryQuery = 'INSERT INTO piscines (activity_id) VALUES (?)';
+                    break;
+                case 7: // Villas
+                    categoryQuery = 'INSERT INTO villas (activity_id) VALUES (?)';
+                    break;
+                case 8: // Excursions
+                    categoryQuery = 'INSERT INTO excursions (activity_id) VALUES (?)';
+                    break;
+                default:
+                    return res.status(201).send({
+                        status: 'success',
+                        message: 'Activity created successfully',
+                        data: { activityId }
+                    });
+            }
+
+            connection.query(categoryQuery, [activityId], (err) => {
+                if (err) {
+                    console.error(err);
+                    return res.status(500).send({
+                        status: 'error',
+                        message: `Error creating ${category_id} entry`,
+                        data: null
+                    });
+                }
+                res.status(201).send({
+                    status: 'success',
+                    message: 'Activity and category entry created successfully',
+                    data: { activityId }
+                });
             });
         });
     } catch (err) {
@@ -1074,7 +1163,7 @@ app.post('/api/activities', authenticateToken, upload.single('logo'), async (req
 // API to update an activity
 app.put('/api/activities/:activity_id', authenticateToken, upload.single('logo'), async (req, res) => {
     const { activity_id } = req.params;
-    const { name, description, city_id, category_id, address, capacity } = req.body;
+    const { name, description, city_id, category_id, address, capacity, active, reservations_allowed } = req.body;
     const user_id = req.user.userId;
 
     console.log("req.user:", req.user.role_id == 4); // Log the entire req.user object
@@ -1087,7 +1176,7 @@ app.put('/api/activities/:activity_id', authenticateToken, upload.single('logo')
         });
     }
 
-    if (!name || !description || !city_id || !category_id || !address || !capacity) {
+    if (!name || !description || !city_id || !category_id || !address || !capacity || active === undefined || reservations_allowed === undefined) {
         return res.status(400).send({
             status: 'error',
             message: 'All fields are required',
@@ -1098,12 +1187,19 @@ app.put('/api/activities/:activity_id', authenticateToken, upload.single('logo')
     const logoUrl = req.file ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}` : null;
 
     try {
-        const query = `
+        let query = `
             UPDATE activities 
-            SET name = ?, description = ?, city_id = ?, category_id = ?, address = ?, capacity = ?, logo = ?
-            WHERE activity_id = ? AND owner_id = ?
+            SET name = ?, description = ?, city_id = ?, category_id = ?, address = ?, capacity = ?, active = ?, reservations_allowed = ?
         `;
-        const values = [name, description, city_id, category_id, address, capacity, logoUrl, activity_id, user_id];
+        const values = [name, description, city_id, category_id, address, capacity, active, reservations_allowed];
+
+        if (logoUrl) {
+            query += `, logo = ?`;
+            values.push(logoUrl);
+        }
+
+        query += ` WHERE activity_id = ? AND owner_id = ?`;
+        values.push(activity_id, user_id);
 
         connection.query(query, values, (err, result) => {
             if (err) {
@@ -1407,6 +1503,988 @@ app.delete('/api/activity_images/:image_id', authenticateToken, async (req, res)
             message: 'Server error',
             data: null
         });
+    }
+});
+
+// Utility function to handle database queries
+function executeQuery(query, values) {
+    return new Promise((resolve, reject) => {
+        connection.query(query, values, (err, results) => {
+            if (err) {
+                return reject(err);
+            }
+            resolve(results);
+        });
+    });
+}
+
+// CRUD operations for spas
+app.post('/api/spas', authenticateToken, async (req, res) => {
+    const { activity_id } = req.body;
+    try {
+        const query = 'INSERT INTO spas (activity_id) VALUES (?)';
+        const result = await executeQuery(query, [activity_id]);
+        res.status(201).send({ message: 'Spa created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/spas/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { activity_id } = req.body;
+    try {
+        const query = 'UPDATE spas SET activity_id = ? WHERE id = ?';
+        await executeQuery(query, [activity_id, id]);
+        res.status(200).send({ message: 'Spa updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/spas/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM spas WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Spa deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/spas', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM spas';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/spas/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM spas WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for types_soins
+app.post('/api/types_soins', authenticateToken, async (req, res) => {
+    const { nom } = req.body;
+    try {
+        const query = 'INSERT INTO types_soins (nom) VALUES (?)';
+        const result = await executeQuery(query, [nom]);
+        res.status(201).send({ message: 'Type de soin created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/types_soins/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { nom } = req.body;
+    try {
+        const query = 'UPDATE types_soins SET nom = ? WHERE id = ?';
+        await executeQuery(query, [nom, id]);
+        res.status(200).send({ message: 'Type de soin updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/types_soins/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM types_soins WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Type de soin deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/types_soins', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM types_soins';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/types_soins/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM types_soins WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for spas_soins
+app.post('/api/spas_soins', authenticateToken, async (req, res) => {
+    const { spa_id, type_soin_id, duree, prix, description } = req.body; // Added description
+    try {
+        const query = 'INSERT INTO spas_soins (spa_id, type_soin_id, duree, prix, description) VALUES (?, ?, ?, ?, ?)'; // Updated query
+        const result = await executeQuery(query, [spa_id, type_soin_id, duree, prix, description]); // Updated values
+        res.status(201).send({ message: 'Spa soin created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/spas_soins/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { spa_id, type_soin_id, duree, prix, description } = req.body; // Added description
+    try {
+        const query = 'UPDATE spas_soins SET spa_id = ?, type_soin_id = ?, duree = ?, prix = ?, description = ? WHERE id = ?'; // Updated query
+        await executeQuery(query, [spa_id, type_soin_id, duree, prix, description, id]); // Updated values
+        res.status(200).send({ message: 'Spa soin updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/spas_soins/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM spas_soins WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Spa soin deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/spas_soins', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM spas_soins';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/spas_soins/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM spas_soins WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for salons_beaute
+app.post('/api/salons_beaute', authenticateToken, async (req, res) => {
+    const { activity_id } = req.body;
+    try {
+        const query = 'INSERT INTO salons_beaute (activity_id) VALUES (?)';
+        const result = await executeQuery(query, [activity_id]);
+        res.status(201).send({ message: 'Salon de beauté created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/salons_beaute/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { activity_id } = req.body;
+    try {
+        const query = 'UPDATE salons_beaute SET activity_id = ? WHERE id = ?';
+        await executeQuery(query, [activity_id, id]);
+        res.status(200).send({ message: 'Salon de beauté updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/salons_beaute/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM salons_beaute WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Salon de beauté deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/salons_beaute', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM salons_beaute';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/salons_beaute/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM salons_beaute WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for services_beaute
+app.post('/api/services_beaute', authenticateToken, async (req, res) => {
+    const { nom } = req.body;
+    try {
+        const query = 'INSERT INTO services_beaute (nom) VALUES (?)';
+        const result = await executeQuery(query, [nom]);
+        res.status(201).send({ message: 'Service de beauté created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/services_beaute/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { nom } = req.body;
+    try {
+        const query = 'UPDATE services_beaute SET nom = ? WHERE id = ?';
+        await executeQuery(query, [nom, id]);
+        res.status(200).send({ message: 'Service de beauté updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/services_beaute/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM services_beaute WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Service de beauté deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/services_beaute', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM services_beaute';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/services_beaute/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM services_beaute WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for salons_services
+app.post('/api/salons_services', authenticateToken, async (req, res) => {
+    const { salon_id, service_id, prix } = req.body;
+    try {
+        const query = 'INSERT INTO salons_services (salon_id, service_id, prix) VALUES (?, ?, ?)';
+        const result = await executeQuery(query, [salon_id, service_id, prix]);
+        res.status(201).send({ message: 'Salon service created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/salons_services/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { salon_id, service_id, prix } = req.body;
+    try {
+        const query = 'UPDATE salons_services SET salon_id = ?, service_id = ?, prix = ? WHERE id = ?';
+        await executeQuery(query, [salon_id, service_id, prix, id]);
+        res.status(200).send({ message: 'Salon service updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/salons_services/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM salons_services WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Salon service deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/salons_services', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM salons_services';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/salons_services/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM salons_services WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for piscines
+app.post('/api/piscines', authenticateToken, async (req, res) => {
+    const { activity_id, type_piscine } = req.body;
+    try {
+        const query = 'INSERT INTO piscines (activity_id, type_piscine) VALUES (?, ?)';
+        const result = await executeQuery(query, [activity_id, type_piscine]);
+        res.status(201).send({ message: 'Piscine created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/piscines/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { activity_id, type_piscine } = req.body;
+    try {
+        const query = 'UPDATE piscines SET activity_id = ?, type_piscine = ? WHERE id = ?';
+        await executeQuery(query, [activity_id, type_piscine, id]);
+        res.status(200).send({ message: 'Piscine updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/piscines/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM piscines WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Piscine deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/piscines', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM piscines';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/piscines/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM piscines WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for services_piscine
+app.post('/api/services_piscine', authenticateToken, async (req, res) => {
+    const { nom } = req.body;
+    try {
+        const query = 'INSERT INTO services_piscine (nom) VALUES (?)';
+        const result = await executeQuery(query, [nom]);
+        res.status(201).send({ message: 'Service de piscine created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/services_piscine/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { nom } = req.body;
+    try {
+        const query = 'UPDATE services_piscine SET nom = ? WHERE id = ?';
+        await executeQuery(query, [nom, id]);
+        res.status(200).send({ message: 'Service de piscine updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/services_piscine/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM services_piscine WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Service de piscine deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/services_piscine', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM services_piscine';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/services_piscine/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM services_piscine WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// API to get activities with related tables based on category
+app.get('/api/activities', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM activities';
+        connection.query(query, async (err, activities) => {
+            if (err) {
+                console.error(err);
+                return res.status(500).send({
+                    status: 'error',
+                    message: 'Error retrieving activities',
+                    data: null
+                });
+            }
+
+            const activitiesWithDetails = await Promise.all(activities.map(async (activity) => {
+                let relatedQuery;
+                switch (activity.category_id) {
+
+                        case 3: // Salons de beauté
+                        relatedQuery = `
+                            SELECT restaurants.*, menus.*, type_menu.nom AS type_menu_nom 
+                            FROM restaurants 
+                            LEFT JOIN menus ON restaurants.id = menus.restaurant_id 
+                            LEFT JOIN type_menu ON menus.type_menu_id = type_menu.id
+                            WHERE restaurants.activity_id = ?;
+                        `;
+                        break;
+                        case 4: // Salons de beauté
+                        relatedQuery = `
+                            SELECT spas.*, spas_soins.*, types_soins.* 
+                            FROM spas 
+                            LEFT JOIN spas_soins ON spas.id = spas_soins.spa_id 
+                            LEFT JOIN types_soins ON spas_soins.type_soin_id = types_soins.id
+                            WHERE spas.activity_id = ?;
+                        `;
+                        break;
+
+                        case 5: // Salons de beauté
+                        relatedQuery = `
+                            SELECT sb.*, ss.*, sb.id AS salon_id, sb.activity_id AS activity_id, ss.id AS service_id, ss.nom AS service_nom, ss.prix AS service_prix
+                            FROM salons_beaute sb
+                            LEFT JOIN salons_services ss ON sb.id = ss.salon_id
+                            LEFT JOIN services_beaute s ON ss.service_id = s.id
+                            WHERE sb.activity_id = ?;
+                        `;
+                        break;
+                    case 6: // Piscines
+                        relatedQuery = `
+                            SELECT piscines.*, piscines_services.*, services_piscine.nom AS service_nom
+                            FROM piscines
+                            LEFT JOIN piscines_services ON piscines.id = piscines_services.piscine_id
+                            LEFT JOIN services_piscine ON piscines_services.service_id = services_piscine.id
+                            WHERE piscines.activity_id = ?;
+                        `;
+                        break;
+                    case 7: // Villas
+                        relatedQuery = `
+                            SELECT villas.*, villas_services.*, services_villa.nom AS service_nom
+                            FROM villas
+                            LEFT JOIN villas_services ON villas.id = villas_services.villa_id
+                            LEFT JOIN services_villa ON villas_services.service_id = services_villa.id
+                            WHERE villas.activity_id = ?;
+                        `;
+                        break;
+                    case 8: // Excursions
+                        relatedQuery = `
+                            SELECT * FROM excursions WHERE activity_id = ?;
+                        `;
+                        break;
+                    default:
+                        return activity;
+                }
+
+                return new Promise((resolve, reject) => {
+                    connection.query(relatedQuery, [activity.activity_id, activity.activity_id], (err, results) => {
+                        if (err) {
+                            return reject(err);
+                        }
+                        //afficier in cosole the results
+                        console.log("resultsresults",results);
+                        activity.related = results;
+                        resolve(activity);
+                    });
+                });
+            }));
+
+            res.status(200).send({
+                status: 'success',
+                message: 'Activities retrieved successfully',
+                data: activitiesWithDetails
+            });
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send({
+            status: 'error',
+            message: 'Server error',
+            data: null
+        });
+    }
+});
+
+// CRUD operations for restaurants
+app.post('/api/restaurants', authenticateToken, async (req, res) => {
+    const { activity_id } = req.body;
+    try {
+        const query = 'INSERT INTO restaurants (activity_id) VALUES (?)';
+        const result = await executeQuery(query, [activity_id]);
+        res.status(201).send({ message: 'Restaurant created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/restaurants/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { activity_id } = req.body;
+    try {
+        const query = 'UPDATE restaurants SET activity_id = ? WHERE id = ?';
+        await executeQuery(query, [activity_id, id]);
+        res.status(200).send({ message: 'Restaurant updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/restaurants/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM restaurants WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Restaurant deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/restaurants', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM restaurants';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/restaurants/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM restaurants WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for type_menu
+app.post('/api/type_menu', authenticateToken, async (req, res) => {
+    const { nom } = req.body;
+    try {
+        const query = 'INSERT INTO type_menu (nom) VALUES (?)';
+        const result = await executeQuery(query, [nom]);
+        res.status(201).send({ message: 'Type de menu created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/type_menu/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { nom } = req.body;
+    try {
+        const query = 'UPDATE type_menu SET nom = ? WHERE id = ?';
+        await executeQuery(query, [nom, id]);
+        res.status(200).send({ message: 'Type de menu updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/type_menu/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM type_menu WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Type de menu deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/type_menu', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM type_menu';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/type_menu/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM type_menu WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for menus
+app.post('/api/menus', authenticateToken, upload.single('imageplat'), async (req, res) => {
+    const { restaurant_id, type_menu_id, nom, description, prix } = req.body;
+    const imageplat = req.file ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}` : null; // Handle image upload
+
+    try {
+        const query = 'INSERT INTO menus (restaurant_id, type_menu_id, nom, description, prix, imageplat) VALUES (?, ?, ?, ?, ?, ?)'; // Updated query
+        const result = await executeQuery(query, [restaurant_id, type_menu_id, nom, description, prix, imageplat]); // Updated values
+        res.status(201).send({ message: 'Menu created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/menus/:id', authenticateToken, upload.single('imageplat'), async (req, res) => {
+    const { id } = req.params;
+    const { restaurant_id, type_menu_id, nom, description, prix } = req.body;
+    const imageplat = req.file ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}` : null; // Handle image upload
+
+    try {
+        let query = 'UPDATE menus SET restaurant_id = ?, type_menu_id = ?, nom = ?, description = ?, prix = ?';
+        const values = [restaurant_id, type_menu_id, nom, description, prix];
+
+        if (imageplat) {
+            query += ', imageplat = ?';
+            values.push(imageplat);
+        }
+
+        query += ' WHERE id = ?';
+        values.push(id);
+
+        await executeQuery(query, values);
+        res.status(200).send({ message: 'Menu updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/menus/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM menus WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Menu deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/menus', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM menus';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/menus/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM menus WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for villas
+app.post('/api/villas', authenticateToken, async (req, res) => {
+    const { activity_id, nombre_chambres, prix_nuit } = req.body;
+    try {
+        const query = 'INSERT INTO villas (activity_id, nombre_chambres, prix_nuit) VALUES (?, ?, ?)';
+        const result = await executeQuery(query, [activity_id, nombre_chambres, prix_nuit]);
+        res.status(201).send({ message: 'Villa created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/villas/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { activity_id, nombre_chambres, prix_nuit } = req.body;
+    try {
+        const query = 'UPDATE villas SET activity_id = ?, nombre_chambres = ?, prix_nuit = ? WHERE id = ?';
+        await executeQuery(query, [activity_id, nombre_chambres, prix_nuit, id]);
+        res.status(200).send({ message: 'Villa updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/villas/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM villas WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Villa deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/villas', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM villas';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/villas/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM villas WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for services_villa
+app.post('/api/services_villa', authenticateToken, async (req, res) => {
+    const { nom } = req.body;
+    try {
+        const query = 'INSERT INTO services_villa (nom) VALUES (?)';
+        const result = await executeQuery(query, [nom]);
+        res.status(201).send({ message: 'Service de villa created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/services_villa/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { nom } = req.body;
+    try {
+        const query = 'UPDATE services_villa SET nom = ? WHERE id = ?';
+        await executeQuery(query, [nom, id]);
+        res.status(200).send({ message: 'Service de villa updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/services_villa/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM services_villa WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Service de villa deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/services_villa', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM services_villa';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/services_villa/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM services_villa WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+// CRUD operations for villas_services
+app.post('/api/villas_services', authenticateToken, async (req, res) => {
+    const { villa_id, service_id, prix, description } = req.body; // Added description
+    try {
+        const query = 'INSERT INTO villas_services (villa_id, service_id, prix, description) VALUES (?, ?, ?, ?)'; // Updated query
+        const result = await executeQuery(query, [villa_id, service_id, prix, description]); // Updated values
+        res.status(201).send({ message: 'Villa service created', id: result.insertId });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.put('/api/villas_services/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    const { villa_id, service_id, prix, description } = req.body; // Added description
+    try {
+        const query = 'UPDATE villas_services SET villa_id = ?, service_id = ?, prix = ?, description = ? WHERE id = ?'; // Updated query
+        await executeQuery(query, [villa_id, service_id, prix, description, id]); // Updated values
+        res.status(200).send({ message: 'Villa service updated' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.delete('/api/villas_services/:id', authenticateToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'DELETE FROM villas_services WHERE id = ?';
+        await executeQuery(query, [id]);
+        res.status(200).send({ message: 'Villa service deleted' });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/villas_services', async (req, res) => {
+    try {
+        const query = 'SELECT * FROM villas_services';
+        const results = await executeQuery(query);
+        res.status(200).send(results);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
+    }
+});
+
+app.get('/api/villas_services/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const query = 'SELECT * FROM villas_services WHERE id = ?';
+        const results = await executeQuery(query, [id]);
+        res.status(200).send(results[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server error');
     }
 });
 
